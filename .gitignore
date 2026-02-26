@@ -1,9 +1,10 @@
 # History files
 .Rhistory
 .Rapp.history
+renv/library
 
 # Session Data files
-.RData
+data/.RData
 .RDataTmp
 
 # User-specific files
