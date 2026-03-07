@@ -193,17 +193,41 @@ mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
       # Calculate indicator based on dropdown selection
       stats <- filtered_ir() |>
         mutate(
+          # Force types for specific indicators
+          v481_char = tolower(as.character(v481)),
+          hw70_num  = as.numeric(as.character(hw70_1)),
+          m3a_char  = tolower(as.character(m3a_1)),
+          b5_char   = tolower(as.character(b5_01)),
+          v008_num  = as.numeric(as.character(v008)),
+          b3_01_num = as.numeric(as.character(b3_01))
+        )
+        mutate(
           # Define the binary indicator based on user choice
           .ind = case_when(
             input$map_indicator == "cpr"       ~ as.numeric(v313 %in% c("modern method", "traditional method", "folkloric method")),
             input$map_indicator == "anc4"      ~ as.numeric(as.numeric(m14_1) >= 4), # Note: Using m14_1 for 2022
-            input$map_indicator == "insurance" ~ as.numeric(v481 == "yes"),
+            # Health Insurance
+            input$map_indicator == "insurance" ~ 
+              as.numeric(v481_char == "yes"),
+            
+            # Skilled Birth Attendance (SBA)
+            input$map_indicator == "sba" ~ 
+              as.numeric(grepl("doctor|nurse|midwife|clinical", m3a_char)),
+            
+            # Stunting (< -2 SD)
+            input$map_indicator == "stunting" ~ 
+              ifelse(!is.na(hw70_num) & hw70_num < 9000, as.numeric(hw70_num < -200), NA_real_),
+            
+            # Under-5 Mortality (Simplified for County Map)
+            input$map_indicator == "u5mr" ~ 
+              ifelse((v008_num - b3_01_num) < 60, as.numeric(b5_char %in% c("0", "no", "died")), NA_real_),
             TRUE ~ 0
           )
         ) |>
         group_by(v024) |> # v024 = County in KDHS 2022
         summarise(
-          val = survey_mean(.ind, na.rm = TRUE) * 100
+          multiplier = ifelse(input$map_indicator == 'u5mr', 1000, 100),
+          val = survey_mean(.ind, na.rm = TRUE) * multiplier
         ) |>
         mutate(county_name = as.character(v024))
       
