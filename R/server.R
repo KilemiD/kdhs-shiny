@@ -41,6 +41,9 @@ server <- function(input, output, session) {
         incProgress(0.5, detail = "Loading Birth Recode (BR)...")
         raw_data$br <- load_recode("br")
 
+        incProgress(0.6, detail = "Loading Household Members (PR)...")
+        raw_data$pr <- load_recode("pr")
+
         incProgress(0.7, detail = "Loading GPS data...")
         raw_data$ge <- load_gps()
 
@@ -87,6 +90,11 @@ server <- function(input, output, session) {
     create_br_design(raw_data$br)
   })
 
+  pr_design <- reactive({
+    req(raw_data$pr)
+    create_pr_design(raw_data$pr)
+  })
+
   # ---- GLOBAL KPIs (for About tab) ------------------------------------------
   output$global_kpis <- renderUI({
     req(ir_design())
@@ -117,10 +125,19 @@ server <- function(input, output, session) {
   })
 
   # ---- CALL MODULE SERVERS --------------------------------------------------
-  mod_overview_server("overview", ir_design, hr_design, raw_data)
-  mod_maternal_server("maternal", ir_design, kr_design, raw_data)
+  # kr/br/pr designs added so the child-mortality, stunting and health-insurance
+  # cards can be computed from their proper source recodes instead of being
+  # hard-coded national strings.
+  mod_overview_server("overview", ir_design, hr_design,
+                      kr_design, br_design, pr_design, raw_data)
+  mod_survival_server("survival", kr_design, br_design, raw_data)
+  # br_design added: the child-mortality panels need the birth history.
+  mod_maternal_server("maternal", ir_design, kr_design, br_design, raw_data)
   mod_gender_server("gender", ir_design, raw_data)
   mod_hiv_server("hiv", ir_design, mr_design, raw_data)
-  mod_new_server("new_modules", hr_design, ir_design, raw_data)
+  # kr_design (ECDI), mr_design (chronic disease in men) and pr_design
+  # (disability, insurance type) added for the KDHS 2022 modules.
+  mod_new_server("new_modules", hr_design, ir_design, kr_design, mr_design,
+                 pr_design, raw_data)
   mod_explorer_server("explorer", ir_design, mr_design, kr_design, hr_design, raw_data)
 }

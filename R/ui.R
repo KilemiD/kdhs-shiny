@@ -21,6 +21,9 @@ ui <- navbarPage(
 
   # ---- TABS -----------------------------------------------------------------
   tabPanel("Overview",             icon = icon("chart-pie"),   mod_overview_ui("overview")),
+  # The thesis subject: under-five child mortality, from Kaplan-Meier through Cox
+  # to the county frailty that the spatial ML models build on.
+  tabPanel("Child Survival",       icon = icon("child"),       mod_survival_ui("survival")),
   tabPanel("Maternal & Child",     icon = icon("baby"),        mod_maternal_ui("maternal")),
   tabPanel("Gender & GBV",         icon = icon("venus-mars"),  mod_gender_ui("gender")),
   tabPanel("HIV & Sexual Health",  icon = icon("ribbon"),      mod_hiv_ui("hiv")),
