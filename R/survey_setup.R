@@ -77,6 +77,20 @@ create_hr_design <- function(hr) {
     )
 }
 
+# ---- HOUSEHOLD MEMBERS (PR) -------------------------------------------------
+#' Create survey design for the Household Members Recode (one row per person).
+#' Source for the Washington Group disability questions and insurance type.
+create_pr_design <- function(pr) {
+  pr |>
+    mutate(wt = as.numeric(hv005) / 1e6) |>
+    as_survey_design(
+      ids     = hv021,
+      strata  = hv023,
+      weights = wt,
+      nest    = TRUE
+    )
+}
+
 # ---- HALF-SAMPLE MODULE FILTER ----------------------------------------------
 #' KDHS 2022 introduced several modules collected on only HALF the sample.
 #' Always filter to the relevant sub-sample before analysis.
@@ -85,14 +99,20 @@ create_hr_design <- function(hr) {
 #' @param df A data frame (HR recode)
 #' @param module One of: "disability", "chronic", "covid", "food"
 filter_half_sample <- function(df, module) {
-  # DHS typically uses a half-sample flag. Check your codebook for exact variable.
-  # Common approach: households in half-sample have a specific hv027 value (0 or 1)
-  # Adjust the variable name and value below to match your codebook.
+  # hv027 flags the half-sample selected for the men's survey, which is also the
+  # sub-sample asked the extra KDHS 2022 modules (19,747 of 37,911 households).
+  #
+  # preprocess.R converts labelled values to FACTORS, so hv027 has the levels
+  # "not selected" / "men's survey" / "husband's survey" — comparing it to the
+  # numeric 1 matched nothing and silently returned an empty design.
+  # as.character() makes this work whether hv027 arrives as a factor or as codes.
+  in_subsample <- quote(as.character(hv027) %in% c("men's survey", "1"))
   half_sample_modules <- list(
-    disability = quote(hv027 == 1),
-    chronic    = quote(hv027 == 1),
-    covid      = quote(hv027 == 1),
-    food       = quote(hv027 == 1)
+    disability = in_subsample,
+    chronic    = in_subsample,
+    covid      = in_subsample,
+    food       = in_subsample,
+    insurance  = in_subsample
   )
   filter_expr <- half_sample_modules[[module]]
   if (is.null(filter_expr)) stop("Unknown module: ", module)

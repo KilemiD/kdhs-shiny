@@ -5,19 +5,21 @@
 # =============================================================================
 
 # ---- PATHS ------------------------------------------------------------------
-# Place your raw .dta files in the /data folder.
-# Rename them to the convention below (or adjust these paths).
-DATA_DIR <- "data"
+# Raw .dta files live in 02-data/kdhs-2022/stata/ and are read only by preprocess.R.
+# This loader reads the .rds files preprocess.R writes.
+# Shared data root (see phd/README.md). Paths are relative to this app folder.
+DATA_DIR    <- "../../02-data/kdhs-2022/processed"
+SPATIAL_DIR <- "../../02-data/spatial"
 
 PATHS <- list(
-  hr = file.path(DATA_DIR, "KEHR8CFL.DTA"),   # Household Recode
-  pr = file.path(DATA_DIR, "KEPR8CFL.DTA"),   # Household Members (PR)
-  ir = file.path(DATA_DIR, "KEIR8CFL.DTA"),   # Women's Individual Recode
-  mr = file.path(DATA_DIR, "KEMR8CFL.DTA"),   # Men's Recode
-  kr = file.path(DATA_DIR, "KEKR8CFL.DTA"),   # Children's Recode
-  br = file.path(DATA_DIR, "KEBR8CFL.DTA"),   # Birth Recode
-  cr = file.path(DATA_DIR, "KECR8CFL.DTA"),   # Couples Recode
-  ge = file.path(DATA_DIR, "Kenya_Counties_(080719).shp")    # GPS / Spatial (shapefile)
+  hr = file.path(DATA_DIR, "hr.rds"),   # Household Recode
+  pr = file.path(DATA_DIR, "pr.rds"),   # Household Members (one row per person)
+  ir = file.path(DATA_DIR, "ir.rds"),   # Women's Individual Recode
+  mr = file.path(DATA_DIR, "mr.rds"),   # Men's Recode
+  kr = file.path(DATA_DIR, "kr.rds"),   # Children's Recode
+  br = file.path(DATA_DIR, "br.rds"),   # Birth Recode
+  #cr = file.path(DATA_DIR, "KECR8CFL.DTA"),   # Couples Recode
+  ge = file.path(SPATIAL_DIR, "Kenya_Counties_(080719).shp")    # GPS / Spatial (shapefile)
 )
 
 # ---- LOADER FUNCTION --------------------------------------------------------
@@ -25,17 +27,20 @@ PATHS <- list(
 #' @param key Character. One of: "hr", "pr", "ir", "mr", "kr", "br", "cr"
 #' @return A tibble with variable labels preserved.
 load_recode <- function(key) {
+  # Use the RDS path defined in your PATHS list
   path <- PATHS[[key]]
+  
   if (!file.exists(path)) {
-    stop(glue::glue(
-      "File not found: {path}\n",
-      "Please download the 2022 KDHS {toupper(key)} recode from https://dhsprogram.com ",
-      "and place it in the /data folder."
-    ))
+    stop(paste("File not found:", path))
   }
-  message(glue::glue("Loading {toupper(key)} recode from {path}..."))
-  haven::read_dta(path, encoding = "latin1") |>
-    haven::as_factor()  # Convert value labels to factors
+  
+  # Use native readRDS for .rds files. 
+  # Avoid using haven::read_dta on .rds files.
+  if (grepl("\\.rds$", path, ignore.case = TRUE)) {
+    return(readRDS(path))
+  } else {
+    return(haven::read_dta(path) %>% haven::as_factor())
+  }
 }
 
 # ---- LOAD GPS SHAPEFILE -----------------------------------------------------
@@ -50,9 +55,9 @@ load_gps <- function() {
 
 # ---- LOAD COUNTY SHAPEFILE --------------------------------------------------
 # Download Kenya county boundaries from GADM: https://gadm.org/download_country.html
-# Save as data/kenya_counties.shp
+# Stored at 02-data/spatial/Kenya_Counties_(080719).shp
 load_county_shapefile <- function() {
-  path <- file.path(DATA_DIR, "Kenya_Counties_(080719).shp")
+  path <- file.path(SPATIAL_DIR, "Kenya_Counties_(080719).shp")
   if (!file.exists(path)) {
     warning("County shapefile not found. Choropleth maps will be disabled.")
     return(NULL)
@@ -71,7 +76,7 @@ load_all_recodes <- function() {
     mr = load_recode("mr"),
     kr = load_recode("kr"),
     br = load_recode("br"),
-    cr = load_recode("cr"),
+    #cr = load_recode("cr"),
     ge = load_gps(),
     counties = load_county_shapefile()
   )

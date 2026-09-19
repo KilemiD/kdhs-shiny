@@ -60,6 +60,82 @@ compute_proportion <- function(design, var, value = NULL, by = NULL) {
   result
 }
 
+# ---- CATEGORICAL PALETTE ----------------------------------------------------
+#' n distinct colours for a grouped chart.
+#'
+#' KDHS_COLORS holds 13 colours. Passing it straight to scale_colour_manual()
+#' fails the moment a chart has more groups than that — grouping a survival curve
+#' by county needs 47 and produced
+#'   "Insufficient values in manual scale. 47 needed but only 13 provided."
+#' which ggplotly surfaced as a silently blank panel. Always size the palette to
+#' the data instead of assuming it fits.
+#'
+#' Up to 13 groups keep the KDHS house colours; above that, fall back to an
+#' evenly spaced hue wheel, which stays distinguishable and never runs out.
+kdhs_palette <- function(n) {
+  if (!is.finite(n) || n < 1) return(character(0))
+  house <- unname(unlist(KDHS_COLORS))
+  if (n <= length(house)) return(house[seq_len(n)])
+  grDevices::hcl(h = seq(15, 375, length.out = n + 1)[seq_len(n)],
+                 c = 100, l = 62)
+}
+
+# ---- AXIS ORDERING ----------------------------------------------------------
+#' Order a column's factor levels by another column.
+#'
+#' Use this instead of reorder() inside aes(). ggplotly turns the aes EXPRESSION
+#' into the hover label and the axis title, so aes(x = reorder(county, pct))
+#' shows the reader a tooltip reading "reorder(county, pct): Mandera" and an axis
+#' titled "reorder(county, pct)". Ordering the factor up front means aes() can
+#' name the column directly and the label stays clean.
+#'
+#' @param data  A data frame
+#' @param var   Column whose levels should be reordered (character name)
+#' @param by    Column to order by (character name)
+#' @param desc  TRUE to put the largest value first
+order_levels <- function(data, var, by, desc = FALSE) {
+  if (!all(c(var, by) %in% names(data)) || nrow(data) == 0) return(data)
+  vals <- as.character(data[[var]])
+  ord  <- order(data[[by]], decreasing = desc, na.last = TRUE)
+  data[[var]] <- factor(vals, levels = unique(vals[ord]))
+  data
+}
+
+# ---- EMPTY-SELECTION GUARD --------------------------------------------------
+#' Does this survey design still have rows?
+#'
+#' srvyr's summarise() on an EMPTY grouped design fails with an opaque
+#' "subscript out of bounds" from cur_svy_env$split[[cur_group_id()]]. Call this
+#' before summarising anything derived from a user filter so the panel can show
+#' a readable message instead.
+svy_has_rows <- function(design) {
+  !is.null(design) && !is.null(design$variables) && nrow(design$variables) > 0
+}
+
+#' Match a filter choice to a data value, ignoring case.
+#'
+#' The filter dropdowns are written in Title Case ("Poorest", "No education")
+#' while the DHS value labels are lower case ("poorest", "no education"), so a
+#' plain == comparison matched nothing, emptied the design and crashed the panel.
+#'
+#' Works on BOTH design flavours in this app, which is not cosmetic:
+#'   - srvyr `tbl_svy`      — what create_*_design() returns; dplyr::filter works
+#'   - `survey.design2`     — what u5cm_design() returns; dplyr::filter does NOT,
+#'                            it fails with "no applicable method for 'filter'"
+#' Row-subsetting via `[` is defined for survey designs and correctly carries the
+#' strata and PSU information, so use that for the plain-survey case.
+svy_filter_eq <- function(design, var, choice) {
+  if (is.null(choice) || identical(choice, "All")) return(design)
+  if (is.null(design) || !var %in% names(design$variables)) return(design)
+
+  if (inherits(design, "tbl_svy")) {
+    return(design |> filter(tolower(as.character(.data[[var]])) == tolower(choice)))
+  }
+  keep <- tolower(as.character(design$variables[[var]])) == tolower(choice)
+  keep[is.na(keep)] <- FALSE
+  design[keep, ]
+}
+
 # ---- STANDARD BAR CHART -----------------------------------------------------
 #' Create a standard horizontal bar chart for KDHS indicators.
 kdhs_bar <- function(data, x, y, fill = NULL,
@@ -68,49 +144,80 @@ kdhs_bar <- function(data, x, y, fill = NULL,
                      palette = "green") {
 
   fill_col <- if (palette == "green") KDHS_COLORS$primary else KDHS_COLORS$secondary
+  data <- order_levels(data, x, y)
 
-  p <- ggplot(data, aes(x = reorder(!!sym(x), !!sym(y)), y = !!sym(y))) +
-    geom_col(fill = fill_col, alpha = 0.85, width = 0.7) +
-    geom_errorbar(
+  # An explicit `text` aesthetic plus tooltip = "text" below. Without it ggplotly
+  # labels the hover with the raw column names and full precision — readers got
+  # "v190: Poorest / pct: 34.03149" instead of "Poorest: 34.0%".
+  p <- ggplot(data, aes(x = !!sym(x), y = !!sym(y),
+                        text = paste0(!!sym(x), ": ", round(!!sym(y), 1), "%"))) +
+    geom_col(fill = fill_col, alpha = 0.85, width = 0.7)
+
+  # Only draw the interval when the caller actually asked for vartype = "ci".
+  if (all(c("pct_low", "pct_upp") %in% names(data))) {
+    p <- p + geom_errorbar(
       aes(ymin = pct_low, ymax = pct_upp),
       width = 0.25, color = KDHS_COLORS$neutral, linewidth = 0.5
-    ) +
+    )
+  }
+
+  p <- p +
     coord_flip() +
     scale_y_continuous(labels = label_percent(scale = 1), expand = expansion(mult = c(0, 0.05))) +
     labs(title = title, subtitle = subtitle, x = ylab, y = xlab) +
     theme_kdhs()
 
-  ggplotly(p, tooltip = c("x", "y")) |>
+  ggplotly(p, tooltip = "text") |>
     layout(hoverlabel = list(bgcolor = "white"))
 }
 
 # ---- GROUPED BAR CHART (e.g., Urban vs Rural) -------------------------------
 kdhs_grouped_bar <- function(data, x, y, group,
-                              title = "", subtitle = "") {
-  p <- ggplot(data, aes(x = !!sym(x), y = !!sym(y), fill = !!sym(group))) +
+                              title = "", subtitle = "",
+                              xlab = "", ylab = "Percentage (%)") {
+  p <- ggplot(data, aes(x = !!sym(x), y = !!sym(y), fill = !!sym(group),
+                        text = paste0(!!sym(x), " — ", !!sym(group), "<br>",
+                                      round(!!sym(y), 1), "%"))) +
     geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
     scale_fill_manual(values = c(KDHS_COLORS$urban, KDHS_COLORS$rural)) +
     scale_y_continuous(labels = label_percent(scale = 1)) +
-    labs(title = title, subtitle = subtitle, fill = "") +
-    theme_kdhs()
+    # Without these the axes are titled with the raw DHS column names (v024, pct)
+    labs(title = title, subtitle = subtitle, x = xlab, y = ylab, fill = "") +
+    theme_kdhs() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
 
-  ggplotly(p, tooltip = c("x", "y", "fill"))
+  ggplotly(p, tooltip = "text")
 }
 
 # ---- TREND LINE CHART -------------------------------------------------------
 kdhs_trend <- function(data, x, y, group = NULL,
-                        title = "", ylab = "Percentage (%)") {
-  p <- ggplot(data, aes(x = !!sym(x), y = !!sym(y),
-                         color = if (!is.null(group)) !!sym(group) else NULL,
-                         group = if (!is.null(group)) !!sym(group) else 1)) +
+                        title = "", ylab = "Percentage (%)",
+                        xlab = "Survey Year", grouplab = "") {
+  # The old version put `if (!is.null(group)) !!sym(group) else NULL` INSIDE aes(),
+  # so ggplotly used that whole expression as the series name — the legend and
+  # every tooltip read "if (!is.null(group)) indicator else NULL: anc4".
+  # Build the mapping outside aes() instead.
+  mapping <- if (!is.null(group)) {
+    aes(x = !!sym(x), y = !!sym(y), colour = !!sym(group), group = !!sym(group),
+        text = paste0(.data[[group]], "<br>", !!sym(x), ": ", round(!!sym(y), 1), "%"))
+  } else {
+    aes(x = !!sym(x), y = !!sym(y), group = 1,
+        text = paste0(!!sym(x), ": ", round(!!sym(y), 1), "%"))
+  }
+
+  p <- ggplot(data, mapping) +
     geom_line(linewidth = 1.2) +
     geom_point(size = 3) +
     scale_y_continuous(labels = label_percent(scale = 1)) +
-    scale_color_manual(values = unlist(KDHS_COLORS[1:5])) +
-    labs(title = title, y = ylab, x = "Survey Year") +
+    # unname(): unlist() keeps the KDHS_COLORS names (primary, secondary, ...),
+    # and ggplot2 then tries to match those against the data's group levels,
+    # finds none, warns "No shared levels found" and drops the palette.
+    # Unnamed values are matched positionally, which is what is wanted here.
+    scale_colour_manual(values = kdhs_palette(if (!is.null(group)) dplyr::n_distinct(data[[group]]) else 1)) +
+    labs(title = title, y = ylab, x = xlab, colour = grouplab) +
     theme_kdhs()
 
-  ggplotly(p)
+  ggplotly(p, tooltip = "text")
 }
 
 # ---- STAT VALUE BOX ---------------------------------------------------------
