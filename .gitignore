@@ -40,11 +40,30 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 
-# pkgdown site
-docs/
+# pkgdown site — NOT ignored here. The stock R template ignores docs/ because
+# pkgdown generates a site there, but this project has no pkgdown site and docs/
+# holds hand-written documentation (METHODS.md, DECISIONS.md) that must be
+# tracked. Re-adding a blanket docs/ rule would silently un-commit it.
+# docs/
 
 # translation temp files
 po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# ---- Data: never commit DHS microdata -------------------------------------
+# The DHS data licence forbids redistributing these files. They live outside
+# this repo in ../../02-data/ — see phd/README.md.
+data/
+*.DTA
+*.dta
+*.SAV
+*.sav
+*.rds
+*.RData
+
+# ---- Credentials ----------------------------------------------------------
+token.txt
+*.pat
+.Renviron
