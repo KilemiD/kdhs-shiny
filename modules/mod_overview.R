@@ -67,7 +67,10 @@ mod_overview_ui <- function(id) {
                                     "ANC 4+ Visits"             = "anc4",
                                     "Skilled Birth Attendance"  = "sba",
                                     "Under-5 Mortality Rate"    = "u5mr",
-                                    "Health Insurance Coverage" = "insurance",
+                                    # "Health Insurance Coverage" removed: it is a
+                                    # household-level (HR) measure and this map is
+                                    # built from the women's (IR) design. Needs a
+                                    # separate HR-based branch to come back.
                                     "Stunting (children <5)"    = "stunting"
                                   )))
           ),
@@ -85,80 +88,149 @@ mod_overview_ui <- function(id) {
 }
 
 # ---- SERVER -----------------------------------------------------------------
-mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
+mod_overview_server <- function(id, ir_design, hr_design,
+                                kr_design, br_design, pr_design, raw_data) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
+    # One place to read the filter controls. apply_filters() (R/indicators.R)
+    # maps these onto whichever recode it is given — the women's, children's and
+    # birth files use v024/v025/v190, the household-member file hv024/hv025/hv270.
+    # `age` is a woman's age group, so it only applies to the women's file and is
+    # skipped elsewhere.
+    active_filters <- reactive(list(
+      residence = input$residence,
+      wealth    = input$wealth,
+      county    = input$region,
+      age       = input$age_group
+    ))
+
+    # TRUE when a filter is set that the child/household cards cannot honour.
+    age_only_filter <- reactive(!identical(input$age_group, "All"))
+
+    filtered_kr <- reactive({ req(kr_design()); apply_filters(kr_design(), "kr", active_filters()) })
+    filtered_br <- reactive({ req(br_design()); apply_filters(br_design(), "br", active_filters()) })
+    filtered_pr <- reactive({ req(pr_design()); apply_filters(pr_design(), "pr", active_filters()) })
+
     # ---- Filtered design (responds to filter inputs) ------------------------
+    # The dropdowns are Title Case ("Poorest") but the DHS value labels are lower
+    # case ("poorest"), so `as.character(v190) == input$wealth` matched nothing.
+    # That left an EMPTY design, and srvyr's summarise() on an empty grouped
+    # design fails with "subscript out of bounds" — which is what broke the
+    # wealth chart and the county map the moment a filter was touched.
+    # svy_filter_eq() compares case-insensitively; see R/helpers.R.
     filtered_ir <- reactive({
       design <- ir_design()
       req(design)
-
-      if (input$residence != "All") {
-        residence_val <- ifelse(input$residence == "Urban", "urban", "rural")
-        design <- design |> filter(v025 == residence_val)
-      }
-      if (input$wealth != "All") {
-        design <- design |> filter(as.character(v190) == input$wealth)
-      }
-      if (input$age_group != "All") {
-        # v013 is the 5-year age group variable in IR
-        design <- design |> filter(as.character(v013) == input$age_group)
-      }
+      design <- svy_filter_eq(design, "v025", input$residence)
+      design <- svy_filter_eq(design, "v190", input$wealth)
+      design <- svy_filter_eq(design, "v013", input$age_group)   # 5-year age group
+      design <- svy_filter_eq(design, "v024", input$region)      # county
       design
     })
 
+    # Region was a dead control: the dropdown was hard-coded to the eight old
+    # provinces while v024 holds the 47 counties, and filtered_ir() never even
+    # read it. Populate it from the data so the labels always match.
+    observeEvent(ir_design(), once = TRUE, {
+      counties <- sort(unique(as.character(ir_design()$variables$v024)))
+      updateSelectInput(session, "region",
+                        label   = "County",
+                        choices = c("All", stats::setNames(counties, fmt_label(counties))),
+                        selected = "All")
+    })
+
     # ---- KPI Cards ----------------------------------------------------------
+    # NOTE: v201 is "total children ever born", so this is the mean CEB of women
+    # 15-49, NOT the total fertility rate. TFR needs age-specific fertility rates
+    # from the birth history; it is not a mean of a single column. Labelled for
+    # what it actually measures.
     output$kpi_tfr <- renderUI({
       req(filtered_ir())
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
       val <- filtered_ir() |>
-        summarise(tfr = survey_mean(as.numeric(v201), na.rm = TRUE)) |>
-        pull(tfr)
-      stat_box(round(val, 1), "Total Fertility Rate", "children per woman")
+        summarise(ceb = survey_mean(as.numeric(v201), na.rm = TRUE)) |>
+        pull(ceb)
+      stat_box(round(val, 1), "Children Ever Born", "mean, women 15-49")
     })
 
+    # Report definition: CPR is among CURRENTLY MARRIED women 15-49 (63% any
+    # method, 57% modern in Table 8). Over all women it is ~46% — a valid figure
+    # but not the one in the report, which is what this card used to show.
     output$kpi_cpr <- renderUI({
       req(filtered_ir())
-      val <- filtered_ir() |>
-        mutate(.fp = as.numeric(v313 %in% c(1, 2, 3))) |>
-        summarise(cpr = survey_mean(.fp, na.rm = TRUE)) |>
-        pull(cpr) * 100
-      stat_box(fmt_pct(val), "Contraceptive Prevalence", "any method", color = "green")
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
+      val <- indicator_cpr(filtered_ir(), married = TRUE)
+      stat_box(fmt_pct(val), "Contraceptive Prevalence",
+               "any method, married women 15-49", color = "green")
     })
 
+    # Report definition (Table 11): among women with a live birth or stillbirth
+    # in the 2 years before the survey, with "don't know" kept in the denominator
+    # as not-4+. Dropping don't-know instead gives 67.3% against a published 66%.
     output$kpi_anc <- renderUI({
       req(filtered_ir())
-      val <- filtered_ir() |>
-        filter(!is.na(m14_1)) |>
-        mutate(.anc4 = as.numeric(as.numeric(m14_1) >= 4)) |>
-        summarise(anc4 = survey_mean(.anc4, na.rm = TRUE)) |>
-        pull(anc4) * 100
-      stat_box(fmt_pct(val), "ANC 4+ Visits", "last birth")
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
+      val <- indicator_anc4(filtered_ir())
+      validate(need(!is.na(val), "No births in the last 2 years for this selection."))
+      stat_box(fmt_pct(val), "ANC 4+ Visits", "birth in last 2 years")
     })
 
+    # Under-5 mortality by the DHS direct (synthetic cohort) method on the birth
+    # history — see dhs_child_mortality() in R/indicators.R. A raw proportion of
+    # births that died is biased downward by right-censoring; this is not that.
     output$kpi_u5mr <- renderUI({
-      stat_box("41/1,000", "Under-5 Mortality", "from BR recode", color = "red")
+      req(filtered_br())
+      validate(need(svy_has_rows(filtered_br()),
+                    "No births match this filter combination."))
+      m <- dhs_child_mortality(filtered_br()$variables)
+      validate(need(!is.na(m$under5), "Too few births to estimate mortality."))
+      stat_box(paste0(round(m$under5, 1), "/1,000"), "Under-5 Mortality",
+               if (age_only_filter()) "per 1,000 births; ignores age filter"
+               else "deaths before age 5, per 1,000",
+               color = "red")
     })
 
+    # Per-person coverage from the household-member (PR) recode: the report gives
+    # 26.0% of females and 26.5% of males (Table 3). It is NOT in the women's file
+    # — IR v481 is labelled "NA - Covered by health insurance" and is 100%
+    # missing, which is why this card used to read 0%.
     output$kpi_insurance <- renderUI({
-      req(filtered_ir())
-      val <- filtered_ir() |>
-        mutate(.ins = as.numeric(v481 == "yes")) |>
-        summarise(ins = survey_mean(.ins, na.rm = TRUE)) |>
-        pull(ins) * 100
-      stat_box(fmt_pct(val), "Health Insurance", "any type", color = "red")
+      req(filtered_pr())
+      validate(need(svy_has_rows(filtered_pr()),
+                    "No household members match this filter combination."))
+      val <- indicator_insurance(filtered_pr())
+      validate(need(!is.na(val), "Insurance module not available for this selection."))
+      stat_box(fmt_pct(val), "Health Insurance",
+               if (age_only_filter()) "of people; ignores age filter"
+               else "of household population", color = "red")
     })
 
+    # Height-for-age below -2 SD among children under 5 (Table 14: 17.6%).
     output$kpi_stunting <- renderUI({
-      stat_box("18%", "Stunting (<5 yrs)", "from KR recode", color = "red")
+      req(filtered_kr())
+      validate(need(svy_has_rows(filtered_kr()),
+                    "No children match this filter combination."))
+      val <- indicator_nutrition(filtered_kr(), "stunted")
+      validate(need(!is.na(val), "No measured children for this selection."))
+      stat_box(fmt_pct(val), "Stunting (<5 yrs)",
+               if (age_only_filter()) "HAZ < -2SD; ignores age filter"
+               else "height-for-age < -2 SD", color = "red")
     })
 
     # ---- CPR by Wealth Quintile ---------------------------------------------
     output$plot_cpr_wealth <- renderPlotly({
       req(filtered_ir())
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
+      # Title says "Modern", so measure modern methods. (The old c(1,2,3) test
+      # compared a labelled factor to numeric codes and returned all zeroes.)
       data <- filtered_ir() |>
         group_by(v190) |>
-        mutate(.fp = as.numeric(v313 %in% c(1, 2, 3))) |>
+        mutate(.fp = as.numeric(v313 == "modern method")) |>
         summarise(
           pct     = survey_mean(.fp, na.rm = TRUE, vartype = "ci") * 100
         ) |>
@@ -172,10 +244,13 @@ mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
     # ---- ANC 4+ by Region & Residence --------------------------------------
     output$plot_anc_region <- renderPlotly({
       req(filtered_ir())
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
       data <- ir_design() |>
         filter(!is.na(m14_1)) |>
         mutate(
-          .anc4     = as.numeric(as.numeric(m14_1) >= 4),
+          # as.character() first — as.numeric() on this factor returns level indices
+          .anc4     = as.numeric(suppressWarnings(as.numeric(as.character(m14_1))) >= 4),
           residence = fmt_label(v025)
         ) |>
         group_by(v024, residence) |>
@@ -189,46 +264,51 @@ mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
     ## reactive element for counties
     county_stats <- reactive({
       req(filtered_ir(), input$map_indicator)
+      # Guard before summarising: srvyr fails with "subscript out of bounds" on an
+      # empty design rather than returning zero rows.
+      validate(need(svy_has_rows(filtered_ir()),
+                    "No respondents match this filter combination."))
       
       # Calculate indicator based on dropdown selection
       stats <- filtered_ir() |>
         mutate(
           # Force types for specific indicators
-          v481_char = tolower(as.character(v481)),
-          hw70_num  = as.numeric(as.character(hw70_1)),
-          m3a_char  = tolower(as.character(m3a_1)),
-          b5_char   = tolower(as.character(b5_01)),
-          v008_num  = as.numeric(as.character(v008)),
-          b3_01_num = as.numeric(as.character(b3_01))
-        )
+          anc_visits = suppressWarnings(as.numeric(as.character(m14_1))),
+          # Some hw70 levels are non-numeric DHS flags, so coercion warns; that
+          # is expected and the flagged values become NA, which is what we want.
+          hw70_num   = suppressWarnings(as.numeric(as.character(hw70_1))),
+          # m3a = "Assistance: doctor", m3b = "Assistance: nurse/midwife/clinical
+          # officer" — both plain yes/no flags. The old code ran grepl() for
+          # profession names against a factor whose only levels are yes/no, so
+          # skilled birth attendance always evaluated to 0.
+          sba_flag   = as.numeric(as.character(m3a_1) == "yes" |
+                                  as.character(m3b_1) == "yes"),
+          b5_char    = tolower(as.character(b5_01)),
+          v008_num   = as.numeric(as.character(v008)),
+          b3_01_num  = as.numeric(as.character(b3_01))
+        ) |>
+        # The indicator choice is a single value, not a per-row condition, so it
+        # selects ONE expression rather than branching row by row. case_when()
+        # with a length-1 LHS against length-n RHS is deprecated in dplyr 1.2 and
+        # is flagged there as a source of "subtle silent bugs".
         mutate(
-          # Define the binary indicator based on user choice
-          .ind = case_when(
-            input$map_indicator == "cpr"       ~ as.numeric(v313 %in% c("modern method", "traditional method", "folkloric method")),
-            input$map_indicator == "anc4"      ~ as.numeric(as.numeric(m14_1) >= 4), # Note: Using m14_1 for 2022
-            # Health Insurance
-            input$map_indicator == "insurance" ~ 
-              as.numeric(v481_char == "yes"),
-            
-            # Skilled Birth Attendance (SBA)
-            input$map_indicator == "sba" ~ 
-              as.numeric(grepl("doctor|nurse|midwife|clinical", m3a_char)),
-            
-            # Stunting (< -2 SD)
-            input$map_indicator == "stunting" ~ 
-              ifelse(!is.na(hw70_num) & hw70_num < 9000, as.numeric(hw70_num < -200), NA_real_),
-            
-            # Under-5 Mortality (Simplified for County Map)
-            input$map_indicator == "u5mr" ~ 
-              ifelse((v008_num - b3_01_num) < 60, as.numeric(b5_char %in% c("0", "no", "died")), NA_real_),
-            TRUE ~ 0
+          .ind = switch(input$map_indicator,
+            "cpr"      = as.numeric(v313 != "no method"),
+            "anc4"     = as.numeric(anc_visits >= 4),
+            "sba"      = sba_flag,
+            "stunting" = ifelse(!is.na(hw70_num) & hw70_num < 9000,
+                                as.numeric(hw70_num < -200), NA_real_),
+            # Under-5 mortality, simplified for the county map: among births in
+            # the 60 months before the interview, did the child die?
+            "u5mr"     = ifelse((v008_num - b3_01_num) < 60,
+                                as.numeric(b5_char %in% c("0", "no", "died")),
+                                NA_real_),
+            NA_real_
           )
         ) |>
         group_by(v024) |> # v024 = County in KDHS 2022
-        summarise(
-          multiplier = ifelse(input$map_indicator == 'u5mr', 1000, 100),
-          val = survey_mean(.ind, na.rm = TRUE) * multiplier
-        ) |>
+        summarise(val = survey_mean(.ind, na.rm = TRUE) *
+                        if (input$map_indicator == "u5mr") 1000 else 100) |>
         mutate(county_name = as.character(v024))
       
       stats
@@ -253,7 +333,9 @@ mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
       )
       
       leaflet(map_sf) |>
-        addProviderTiles("CartoDB.Positron") |>
+        # CartoDB.Positron now requires an API key and renders "API KEY REQUIRED"
+        # watermarks over the basemap. OpenStreetMap needs no key.
+        addTiles(attribution = "&copy; OpenStreetMap contributors") |>
         setView(lng = 37.9, lat = 0.02, zoom = 6) |> # Center on Kenya
         addPolygons(
           fillColor   = ~pal(val), 
@@ -308,11 +390,19 @@ mod_overview_server <- function(id, ir_design, hr_design, raw_data) {
       sba       = c(41.6, 43.8, 61.2, 87.0),
       insurance = c(NA,   NA,   17.0, 26.0)
     ) |>
-      pivot_longer(-year, names_to = "indicator", values_to = "pct")
+      pivot_longer(-year, names_to = "indicator", values_to = "pct") |>
+      # The legend and tooltips showed the raw keys (cpr, anc4, sba, insurance)
+      mutate(indicator = recode(indicator,
+        cpr       = "Contraceptive prevalence",
+        anc4      = "ANC 4+ visits",
+        sba       = "Skilled birth attendance",
+        insurance = "Health insurance"
+      ))
 
     output$plot_trends <- renderPlotly({
       kdhs_trend(trend_data, x = "year", y = "pct", group = "indicator",
-                 title = "Progress on Key Indicators: 2003–2022")
+                 title = "Progress on Key Indicators: 2003–2022",
+                 grouplab = "Indicator")
     })
   })
 }

@@ -52,35 +52,211 @@ mod_gender_server <- function(id, ir_design, raw_data) {
                subtitle = "Declining rates in younger cohorts indicate generational change")
     })
     
-    # Domestic violence by type (placeholder data — compute from d-series vars)
+    # ---- Domestic violence by type -----------------------------------------
+    # Computed from the DHS domestic-violence module (d105* / d106-d108) instead
+    # of the placeholder numbers that were here before. v044 flags the woman
+    # selected for the module; the module goes to one eligible woman per
+    # household, so the denominator must be restricted to those selected.
     output$dv_type <- renderPlotly({
-      dv_data <- tibble(
-        type = c("Pushed/shook", "Slapped", "Punched", "Kicked", "Choked", "Sexual violence"),
-        pct  = c(14.2, 23.4, 10.1, 11.3, 4.8, 8.5)
+      req(ir_design())
+      d <- ir_design()
+
+      one <- function(var, label) {
+        if (!var %in% names(d$variables)) return(NULL)
+        d |>
+          filter(!is.na(.data[[var]])) |>
+          mutate(.x = as.numeric(as.character(.data[[var]]) == "yes")) |>
+          summarise(pct = survey_mean(.x, na.rm = TRUE) * 100) |>
+          mutate(type = label)
+      }
+      dv_data <- bind_rows(
+        one("d105a", "Pushed / shook"),
+        one("d105b", "Slapped"),
+        one("d105c", "Punched"),
+        one("d105d", "Kicked / dragged"),
+        one("d104",  "Emotional violence"),
+        one("d106",  "Any less severe physical"),
+        one("d107",  "Any severe physical"),
+        one("d108",  "Any sexual violence")
       )
-      p <- ggplot(dv_data, aes(x = reorder(type, pct), y = pct)) +
+      validate(need(nrow(dv_data) > 0, "Domestic violence module not available."))
+
+      dv_data <- order_levels(dv_data, "type", "pct")
+
+
+      p <- ggplot(dv_data, aes(x = type, y = pct, text = paste0(type, ": ", round(pct, 1)))) +
         geom_col(fill = KDHS_COLORS$secondary, width = 0.7) +
+        geom_text(aes(label = fmt_pct(pct)), hjust = -0.15, size = 3) +
         coord_flip() +
-        scale_y_continuous(labels = label_percent(scale = 1)) +
-        labs(x = "", y = "% of ever-married women") +
+        scale_y_continuous(labels = label_percent(scale = 1),
+                           expand = expansion(mult = c(0, 0.18))) +
+        labs(x = "", y = "% of women asked the DV module") +
         theme_kdhs()
       ggplotly(p)
     })
+
+    # ---- Violence by wealth -------------------------------------------------
+    output$dv_wealth <- renderPlotly({
+      req(ir_design())
+      validate(need("d106" %in% names(ir_design()$variables),
+                    "Domestic violence module not available."))
+      data <- ir_design() |>
+        filter(!is.na(d106) | !is.na(d107)) |>
+        mutate(.any = as.numeric(as.character(d106) == "yes" |
+                                 as.character(d107) == "yes")) |>
+        group_by(v190) |>
+        summarise(pct = survey_mean(.any, na.rm = TRUE, vartype = "ci") * 100) |>
+        mutate(wealth = fmt_label(v190))
+      validate(need(nrow(data) > 0, "No data for this selection."))
+
+      kdhs_bar(data, x = "wealth", y = "pct",
+               title = "Any Physical Violence by Wealth Quintile",
+               subtitle = "Less severe or severe, by husband/partner")
+    })
+
+    # ---- FGM/C by county ----------------------------------------------------
+    output$fgm_county <- renderPlotly({
+      req(ir_design())
+      data <- ir_design() |>
+        filter(!is.na(g102)) |>
+        mutate(.fgm = as.numeric(as.character(g102) == "yes")) |>
+        group_by(v024) |>
+        summarise(pct = survey_mean(.fgm, na.rm = TRUE, vartype = NULL) * 100) |>
+        mutate(county = fmt_label(v024)) |>
+        filter(!is.na(pct)) |>
+        arrange(desc(pct)) |>
+        slice_head(n = 20)
+      validate(need(nrow(data) > 0, "No FGM/C data available."))
+
+      data <- order_levels(data, "county", "pct")
+
+
+      p <- ggplot(data, aes(x = county, y = pct, text = paste0(county, ": ", round(pct, 1)))) +
+        geom_col(fill = KDHS_COLORS$secondary, width = 0.78) +
+        coord_flip() +
+        scale_y_continuous(labels = label_percent(scale = 1)) +
+        labs(x = "", y = "% of women 15-49 circumcised",
+             title = "20 highest-prevalence counties") +
+        theme_kdhs() +
+        theme(axis.text.y = element_text(size = 8))
+      ggplotly(p)
+    })
     
-    # Women's autonomy — healthcare decisions
+    # ---- Women's autonomy: healthcare decisions -----------------------------
+    # Built as a native plotly pie rather than ggplot + coord_polar. ggplotly()
+    # cannot convert a polar/theme_void plot: it fails with
+    #   "Error in rng[[xy]]$get_labels: attempt to apply non-function"
+    # after warning "no non-missing arguments to min; returning Inf", because the
+    # polar coordinate system has no x/y scale for it to read labels off.
     output$auto_health <- renderPlotly({
       req(ir_design())
       data <- ir_design() |>
+        filter(!is.na(v743a)) |>
         group_by(v743a) |>
         summarise(pct = survey_prop(vartype = NULL) * 100) |>
-        mutate(v743a = fmt_label(v743a))
-      
-      p <- ggplot(data, aes(x = "", y = pct, fill = v743a)) +
-        geom_col(width = 1) +
-        coord_polar(theta = "y") +
-        scale_fill_brewer(palette = "Set2") +
-        labs(title = "Decision-maker on healthcare", fill = "") +
-        theme_void() + theme(legend.position = "bottom", plot.title = element_text(face="bold", size=11))
+        mutate(who = fmt_label(v743a)) |>
+        filter(!is.na(pct))
+      validate(need(nrow(data) > 0, "No decision-making data available."))
+
+      plot_ly(
+        data,
+        labels = ~who, values = ~pct, type = "pie", sort = FALSE,
+        textinfo = "percent",
+        hovertemplate = "%{label}<br>%{value:.1f}%<extra></extra>",
+        marker = list(colors = RColorBrewer::brewer.pal(max(3, nrow(data)), "Set2"),
+                      line = list(color = "white", width = 1))
+      ) |>
+        layout(
+          title  = list(text = "Decision-maker on healthcare", font = list(size = 12)),
+          legend = list(orientation = "h", y = -0.1),
+          margin = list(t = 40)
+        )
+    })
+
+    # ---- Land / house ownership --------------------------------------------
+    # v745a "Owns a house alone or jointly", v745b "Owns land alone or jointly".
+    # Both are categorical: "does not own" / "alone only" / "jointly ..." / "both".
+    output$auto_land <- renderPlotly({
+      req(ir_design())
+      d <- ir_design()
+      one <- function(var, label) {
+        if (!var %in% names(d$variables)) return(NULL)
+        d |>
+          filter(!is.na(.data[[var]])) |>
+          mutate(.own = as.numeric(as.character(.data[[var]]) != "does not own")) |>
+          summarise(pct = survey_mean(.own, na.rm = TRUE, vartype = "ci") * 100) |>
+          mutate(asset = label)
+      }
+      data <- bind_rows(one("v745a", "House"), one("v745b", "Land"))
+      validate(need(nrow(data) > 0, "Ownership variables not available."))
+
+      p <- ggplot(data, aes(x = asset, y = pct, text = paste0(asset, ": ", round(pct, 1)))) +
+        geom_col(fill = KDHS_COLORS$primary, width = 0.5) +
+        geom_errorbar(aes(ymin = pct_low, ymax = pct_upp), width = 0.12) +
+        geom_text(aes(label = fmt_pct(pct)), vjust = -0.9, size = 3.2) +
+        scale_y_continuous(labels = label_percent(scale = 1),
+                           expand = expansion(mult = c(0, 0.25))) +
+        labs(x = "", y = "% owning, alone or jointly") +
+        theme_kdhs()
+      ggplotly(p)
+    })
+
+    # ---- Bank account -------------------------------------------------------
+    output$auto_bank <- renderPlotly({
+      req(ir_design())
+      validate(need("v170" %in% names(ir_design()$variables),
+                    "Bank-account variable (v170) not available."))
+      data <- ir_design() |>
+        filter(!is.na(v170)) |>
+        mutate(.bank = as.numeric(as.character(v170) == "yes")) |>
+        group_by(v106) |>
+        summarise(pct = survey_mean(.bank, na.rm = TRUE, vartype = "ci") * 100) |>
+        mutate(education = fmt_label(v106))
+      validate(need(nrow(data) > 0, "No data for this selection."))
+
+      kdhs_bar(data, x = "education", y = "pct",
+               title = "Bank Account by Education",
+               subtitle = "% of women with an account at a financial institution")
+    })
+
+    # ---- Child marriage -----------------------------------------------------
+    # v511 = age at first cohabitation. Restricted to women 20-49 so that every
+    # woman in the denominator has already passed 18 — including 15-19 year-olds
+    # would understate it, since some will still marry before turning 18.
+    output$child_marriage <- renderPlotly({
+      req(ir_design())
+      data <- ir_design() |>
+        mutate(.age_union = suppressWarnings(as.numeric(as.character(v511))),
+               .age_now   = suppressWarnings(as.numeric(as.character(v012)))) |>
+        filter(!is.na(.age_now), .age_now >= 20) |>
+        mutate(.u18 = as.numeric(!is.na(.age_union) & .age_union < 18)) |>
+        group_by(v024, v190) |>
+        summarise(pct = survey_mean(.u18, na.rm = TRUE, vartype = NULL) * 100,
+                  .groups = "drop") |>
+        mutate(county = fmt_label(v024), wealth = fmt_label(v190)) |>
+        filter(!is.na(pct))
+      validate(need(nrow(data) > 0, "No child-marriage data available."))
+
+      top <- data |>
+        group_by(county) |>
+        summarise(m = mean(pct, na.rm = TRUE), .groups = "drop") |>
+        arrange(desc(m)) |>
+        slice_head(n = 15) |>
+        pull(county)
+
+      plot_data <- data |>
+        filter(county %in% top) |>
+        order_levels("county", "pct")
+
+      p <- ggplot(plot_data, aes(x = county, y = pct, fill = wealth, text = paste0(county, " — ", wealth, "<br>", round(pct, 1)))) +
+        geom_col(position = "dodge", width = 0.8) +
+        coord_flip() +
+        scale_fill_brewer(palette = "YlOrRd") +
+        scale_y_continuous(labels = label_percent(scale = 1)) +
+        labs(x = "", y = "% married or cohabiting before age 18", fill = "Wealth",
+             title = "Women aged 20-49, 15 highest-prevalence counties") +
+        theme_kdhs() +
+        theme(axis.text.y = element_text(size = 8))
       ggplotly(p)
     })
   })
