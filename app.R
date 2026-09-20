@@ -1,6 +1,6 @@
 # =============================================================================
 # KDHS 2022 R Shiny Dashboard — app.R
-# Entry point: loads UI and server, sources all modules
+# Entry point: loads UI and server, sources all modules before running
 # =============================================================================
 # Clear memory and close all connections before starting
 # Clear the R environment and trigger Garbage Collection
